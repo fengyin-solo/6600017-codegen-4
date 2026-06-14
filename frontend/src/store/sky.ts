@@ -1,7 +1,8 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { STARS, CONSTELLATIONS } from '../data/stars'
-import type { Star } from '../types'
+import { METEOR_SHOWERS } from '../data/meteors'
+import type { Star, Meteor, MeteorShower } from '../types'
 
 export const useSkyStore = defineStore('sky', () => {
   const viewDate = ref(new Date())
@@ -14,6 +15,10 @@ export const useSkyStore = defineStore('sky', () => {
   const selectedStar = ref<Star | null>(null)
   const searchQuery = ref('')
   const latitude = ref(39.9) // Beijing default
+  const showMeteorMode = ref(false)
+  const meteors = ref<Meteor[]>([])
+  const meteorIdCounter = ref(0)
+  const lastMeteorSpawn = ref(0)
 
   const localSiderealTime = computed(() => {
     const d = viewDate.value
@@ -69,10 +74,80 @@ export const useSkyStore = defineStore('sky', () => {
     selectedStar.value = closest
   }
 
+  function isDateInRange(date: Date, startMonth: number, startDay: number, endMonth: number, endDay: number): boolean {
+    const month = date.getMonth() + 1
+    const day = date.getDate()
+    const current = month * 100 + day
+    const start = startMonth * 100 + startDay
+    const end = endMonth * 100 + endDay
+    if (start <= end) {
+      return current >= start && current <= end
+    } else {
+      return current >= start || current <= end
+    }
+  }
+
+  function getDaysFromPeak(date: Date, peakMonth: number, peakDay: number): number {
+    const month = date.getMonth() + 1
+    const day = date.getDate()
+    const current = month * 100 + day
+    const peak = peakMonth * 100 + peakDay
+    return Math.abs(current - peak)
+  }
+
+  const activeMeteorShowers = computed(() => {
+    return METEOR_SHOWERS.filter(shower =>
+      isDateInRange(viewDate.value, shower.startMonth, shower.startDay, shower.endMonth, shower.endDay)
+    ).map(shower => {
+      const daysFromPeak = getDaysFromPeak(viewDate.value, shower.peakMonth, shower.peakDay)
+      const activityFactor = Math.max(0.1, 1 - daysFromPeak / 15)
+      return { ...shower, activityFactor }
+    }).sort((a, b) => b.zhr * b.activityFactor - a.zhr * a.activityFactor)
+  })
+
+  function spawnMeteor(now: number) {
+    if (!showMeteorMode.value) return
+    const activeShowers = activeMeteorShowers.value
+    if (activeShowers.length === 0) return
+
+    const totalZhr = activeShowers.reduce((sum, s) => sum + s.zhr * s.activityFactor, 0)
+    const spawnInterval = Math.max(100, 3600000 / totalZhr)
+
+    if (now - lastMeteorSpawn.value < spawnInterval) return
+
+    const showerIndex = Math.floor(Math.random() * activeShowers.length)
+    const shower = activeShowers[showerIndex]
+    const baseSpeed = shower.velocity / 70
+
+    const meteor: Meteor = {
+      id: meteorIdCounter.value++,
+      showerIndex: METEOR_SHOWERS.findIndex(s => s.name === shower.name),
+      progress: 0,
+      speed: 0.01 + Math.random() * 0.02 * baseSpeed,
+      length: 50 + Math.random() * 150,
+      brightness: 0.5 + Math.random() * 0.5,
+      startOffset: -0.2 + Math.random() * 0.4
+    }
+
+    meteors.value.push(meteor)
+    lastMeteorSpawn.value = now
+
+    if (meteors.value.length > 30) {
+      meteors.value = meteors.value.slice(-20)
+    }
+  }
+
+  function updateMeteors(deltaTime: number) {
+    meteors.value = meteors.value
+      .map(m => ({ ...m, progress: m.progress + m.speed * deltaTime * 60 }))
+      .filter(m => m.progress < 1.5)
+  }
+
   return {
     viewDate, zoom, panX, panY, showLabels, showConstLines, showGrid,
     selectedStar, searchQuery, latitude, localSiderealTime, filteredStars,
     projectStar, starRadius, spectralColor, selectStar,
-    STARS, CONSTELLATIONS
+    showMeteorMode, meteors, activeMeteorShowers, spawnMeteor, updateMeteors,
+    STARS, CONSTELLATIONS, METEOR_SHOWERS
   }
 })
