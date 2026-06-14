@@ -114,11 +114,27 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import { useSkyStore } from './store/sky'
 import StarCanvas from './components/StarCanvas.vue'
 
 const store = useSkyStore()
-const dateStr = ref(new Date().toISOString().slice(0, 16))
-function updateDate() { store.viewDate = new Date(dateStr.value) }
+const dateStr = ref(formatDate(store.viewDate))
+
+function formatDate(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+watch(() => store.viewDate, (newDate) => {
+  dateStr.value = formatDate(newDate)
+}, { immediate: true })
+
+function updateDate() {
+  if (!dateStr.value) return
+  const newDate = new Date(dateStr.value)
+  if (!isNaN(newDate.getTime())) {
+    store.viewDate = newDate
+  }
+}
 </script>

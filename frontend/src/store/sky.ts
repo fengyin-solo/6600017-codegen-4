@@ -1,24 +1,85 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch, watchEffect, onMounted } from 'vue'
 import { defineStore } from 'pinia'
 import { STARS, CONSTELLATIONS } from '../data/stars'
 import { METEOR_SHOWERS } from '../data/meteors'
 import type { Star, Meteor, MeteorShower } from '../types'
 
+const STORAGE_KEY = 'sky-store-state-v2'
+
+function loadStoredState(): { [key: string]: any } | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
+function saveStoredState(state: { [key: string]: any }) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)) } catch {}
+}
+
 export const useSkyStore = defineStore('sky', () => {
-  const viewDate = ref(new Date())
-  const zoom = ref(1.0)
+  const stored = loadStoredState()
+
+  const viewDate = ref(stored?.viewDate ? new Date(stored.viewDate) : new Date())
+  const zoom = ref(stored?.zoom ?? 1.0)
   const panX = ref(0)
   const panY = ref(0)
-  const showLabels = ref(true)
-  const showConstLines = ref(true)
-  const showGrid = ref(true)
+  const showLabels = ref(stored?.showLabels ?? true)
+  const showConstLines = ref(stored?.showConstLines ?? true)
+  const showGrid = ref(stored?.showGrid ?? true)
   const selectedStar = ref<Star | null>(null)
   const searchQuery = ref('')
-  const latitude = ref(39.9) // Beijing default
-  const showMeteorMode = ref(false)
+  const latitude = ref(stored?.latitude ?? 39.9)
+  const showMeteorMode = ref(stored?.showMeteorMode ?? false)
   const meteors = ref<Meteor[]>([])
   const meteorIdCounter = ref(0)
   const lastMeteorSpawn = ref(0)
+  const meteorModeStartedAt = ref<number>(0)
+  const hasSeededMeteors = ref(false)
+
+  watchEffect(() => {
+    const state: { [key: string]: any } = {}
+    state.viewDate = viewDate.value.toISOString()
+    state.zoom = zoom.value
+    state.showLabels = showLabels.value
+    state.showConstLines = showConstLines.value
+    state.showGrid = showGrid.value
+    state.latitude = latitude.value
+    state.showMeteorMode = showMeteorMode.value
+    saveStoredState(state)
+  }, { flush: 'post' })
+
+  function resetMeteorSeed() {
+    hasSeededMeteors.value = false
+    meteorModeStartedAt.value = 0
+  }
+
+  watch(showMeteorMode, (val) => {
+    if (val) {
+      meteorModeStartedAt.value = performance.now()
+      if (!hasSeededMeteors.value && activeMeteorShowers.value.length > 0) {
+        seedInitialMeteors()
+      }
+    } else {
+      meteors.value = []
+      resetMeteorSeed()
+    }
+  })
+
+  watch(viewDate, () => {
+    meteors.value = []
+    resetMeteorSeed()
+    if (showMeteorMode.value && activeMeteorShowers.value.length > 0) {
+      seedInitialMeteors()
+    }
+  })
+
+  onMounted(() => {
+    if (showMeteorMode.value && activeMeteorShowers.value.length > 0) {
+      meteorModeStartedAt.value = performance.now()
+      seedInitialMeteors()
+    }
+  })
 
   const localSiderealTime = computed(() => {
     const d = viewDate.value
@@ -105,31 +166,73 @@ export const useSkyStore = defineStore('sky', () => {
     }).sort((a, b) => b.zhr * b.activityFactor - a.zhr * a.activityFactor)
   })
 
-  function spawnMeteor(now: number) {
-    if (!showMeteorMode.value) return
+  function createMeteor(forceProgress?: number): Meteor {
     const activeShowers = activeMeteorShowers.value
-    if (activeShowers.length === 0) return
-
-    const totalZhr = activeShowers.reduce((sum, s) => sum + s.zhr * s.activityFactor, 0)
-    const spawnInterval = Math.max(100, 3600000 / totalZhr)
-
-    if (now - lastMeteorSpawn.value < spawnInterval) return
-
-    const showerIndex = Math.floor(Math.random() * activeShowers.length)
-    const shower = activeShowers[showerIndex]
-    const baseSpeed = shower.velocity / 70
-
-    const meteor: Meteor = {
+    if (activeShowers.length === 0) {
+      return { id: 0, showerIndex: 0, progress: 0, speed: 0, length: 0, brightness: 0, startOffset: 0 }
+    }
+    const totalWeight = activeShowers.reduce((sum, s) => sum + s.zhr * s.activityFactor, 0)
+    let r = Math.random() * totalWeight
+    let chosen = activeShowers[0]
+    for (const s of activeShowers) {
+      r -= s.zhr * s.activityFactor
+      if (r <= 0) { chosen = s; break }
+    }
+    const baseSpeed = chosen.velocity / 70
+    return {
       id: meteorIdCounter.value++,
-      showerIndex: METEOR_SHOWERS.findIndex(s => s.name === shower.name),
-      progress: 0,
+      showerIndex: METEOR_SHOWERS.findIndex(s => s.name === chosen.name),
+      progress: forceProgress ?? 0,
       speed: 0.01 + Math.random() * 0.02 * baseSpeed,
       length: 50 + Math.random() * 150,
       brightness: 0.5 + Math.random() * 0.5,
       startOffset: -0.2 + Math.random() * 0.4
     }
+  }
 
-    meteors.value.push(meteor)
+  function seedInitialMeteors() {
+    const activeShowers = activeMeteorShowers.value
+    if (activeShowers.length === 0) return
+    const totalZhr = activeShowers.reduce((sum, s) => sum + s.zhr * s.activityFactor, 0)
+    const isPeakPeriod = activeShowers.some(s => s.activityFactor > 0.8)
+    const baseCount = Math.round(totalZhr / 20)
+    const seedCount = isPeakPeriod 
+      ? Math.min(12, Math.max(5, baseCount + 3))
+      : Math.min(8, Math.max(3, baseCount))
+    const seeds: Meteor[] = []
+    for (let i = 0; i < seedCount; i++) {
+      const progress = 0.05 + (i / seedCount) * 0.7
+      const meteor = createMeteor(progress)
+      if (isPeakPeriod) {
+        meteor.brightness = Math.max(meteor.brightness, 0.7)
+        meteor.speed *= 1.2
+      }
+      seeds.push(meteor)
+    }
+    meteors.value = [...meteors.value, ...seeds]
+    hasSeededMeteors.value = true
+  }
+
+  function spawnMeteor(now: number) {
+    if (!showMeteorMode.value) return
+    const activeShowers = activeMeteorShowers.value
+    if (activeShowers.length === 0) return
+
+    if (!hasSeededMeteors.value) {
+      seedInitialMeteors()
+      lastMeteorSpawn.value = now
+      return
+    }
+
+    const totalZhr = activeShowers.reduce((sum, s) => sum + s.zhr * s.activityFactor, 0)
+    const baseInterval = Math.max(100, 3600000 / totalZhr)
+    const elapsed = now - meteorModeStartedAt.value
+    const warmupFactor = elapsed < 10000 ? 0.2 + (elapsed / 10000) * 0.8 : 1
+    const spawnInterval = Math.max(80, baseInterval * warmupFactor)
+
+    if (now - lastMeteorSpawn.value < spawnInterval) return
+
+    meteors.value.push(createMeteor())
     lastMeteorSpawn.value = now
 
     if (meteors.value.length > 30) {
